@@ -22,6 +22,7 @@ module Embulk
           "per_size" => config.param("per_size", :integer, default: 1000),
           "limit_size" => config.param("limit_size", :integer, default: nil),
           "fields" => config.param("fields", :array, default: nil),
+          "source_as_json" => config.param("source_as_json", :hash, default: nil),
           "queries" => config.param("queries", :array),
           "sort" => config.param("sort", :hash, default: nil),
           "add_query_to_record" => config.param("add_query_to_record", :bool, default: false),
@@ -31,10 +32,20 @@ module Embulk
         define_num_threads = config.param("num_threads", :integer, default: 1)
         task['slice_queries'] = InputThread.get_slice_from_num_threads(task['queries'], define_num_threads)
 
+        if task['source_as_json'] && task['source_as_json']['fetch']
+          task['fields'] = [{"name" => "_id", "type" => "string", "metadata" => true},
+                            {"name" => "_source", "type" => "json"}]
+
+          task['source_hash'] = {}
+          task['source_hash']['excludes'] = task['source_as_json']['excludes'] if task['source_as_json']['excludes']
+          task['source_hash']['includes'] = task['source_as_json']['includes'] if task['source_as_json']['includes']
+        end
+
         columns = []
         task['fields'].each_with_index{ |field, i|
           columns << Column.new(i, field['name'], field['type'].to_sym)
         }
+
         if task['add_query_to_record']
           columns << Column.new(task['fields'].size, ADD_QUERY_TO_RECORD_KEY, :string)
         end
@@ -61,6 +72,8 @@ module Embulk
         @sort = task['sort']
         @add_query_to_record = task['add_query_to_record']
         @scroll = task['scroll']
+        @source_hash = task['source_hash']
+        @source_as_json = task['source_as_json']
       end
 
       def run
@@ -117,21 +130,39 @@ module Embulk
           body[:sort] = ["_doc"]
         end
         search_option = { index: @index_name, type: type, scroll: @scroll, body: body, size: size }
-        search_option[:_source] = fields.select{ |field| !field['metadata'] }.map { |field| field['name'] }.join(',')
+
+        if @source_hash
+          body[:_source] = {}
+          body[:_source][:includes] = @source_hash['includes'] if @source_hash['includes']
+          body[:_source][:excludes] = @source_hash['excludes'] if @source_hash['excludes']
+        else
+          search_option[:_source] = fields.select{ |field| !field['metadata'] }.map { |field| field['name'] }.join(',')
+        end
+
         search_option
       end
 
       def get_sources(results, fields)
         hits = results['hits']['hits']
-        hits.map { |hit|
-          result = hit['_source']
-          fields.select{ |field| field['metadata'] }.each { |field|
-            result[field['name']] = hit[field['name']]
+        if @source_as_json
+          hits.map { |hit|
+            result = {'_id' => hit['_id'],
+                      '_source' => hit['_source']}
+            @fields.map { |field|
+              convert_value(result[field['name']], field)
+            }
           }
-          @fields.map { |field|
-            convert_value(result[field['name']], field)
+        else
+          hits.map { |hit|
+            result = hit['_source']
+            fields.select{ |field| field['metadata'] }.each { |field|
+              result[field['name']] = hit[field['name']]
+            }
+            @fields.map { |field|
+              convert_value(result[field['name']], field)
+            }
           }
-        }
+        end
       end
 
       def convert_value(value, field)
