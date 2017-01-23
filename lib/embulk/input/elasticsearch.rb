@@ -131,6 +131,9 @@ module Embulk
         end
         search_option = { index: @index_name, type: type, scroll: @scroll, body: body, size: size }
 
+        # Pretty sure size actually has to be in the body
+        body[:size] = size
+
         if @source_hash
           body[:_source] = {}
           body[:_source][:includes] = @source_hash['includes'] if @source_hash['includes']
